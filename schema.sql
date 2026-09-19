@@ -1,95 +1,92 @@
--- Kalshi archive schema. Idempotent: safe to re-apply.
+-- Kalshi archive schema (SQLite). Idempotent: safe to re-apply.
+-- Timestamps are ISO-8601 UTC strings as served by the API; prices/volumes
+-- are REAL dollars/contracts.
 
 CREATE TABLE IF NOT EXISTS series (
-    ticker      text PRIMARY KEY,
-    title       text,
-    category    text,
-    frequency   text,
-    raw         jsonb NOT NULL,
-    fetched_at  timestamptz NOT NULL DEFAULT now()
+    ticker      TEXT PRIMARY KEY,
+    title       TEXT,
+    category    TEXT,
+    frequency   TEXT,
+    raw         TEXT NOT NULL  -- full API JSON
 );
 
 CREATE TABLE IF NOT EXISTS events (
-    event_ticker      text PRIMARY KEY,
-    series_ticker     text,
-    title             text,
-    sub_title         text,
-    category          text,
-    mutually_exclusive boolean,
-    raw               jsonb NOT NULL,
-    fetched_at        timestamptz NOT NULL DEFAULT now()
+    event_ticker       TEXT PRIMARY KEY,
+    series_ticker      TEXT,
+    title              TEXT,
+    sub_title          TEXT,
+    category           TEXT,
+    mutually_exclusive INTEGER,
+    raw                TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_series_idx ON events (series_ticker);
 
 CREATE TABLE IF NOT EXISTS markets (
-    ticker            text PRIMARY KEY,
-    event_ticker      text,
-    market_type       text,
-    title             text,
-    status            text,
-    result            text,
-    open_time         timestamptz,
-    close_time        timestamptz,
-    expiration_time   timestamptz,
-    volume            numeric,
-    open_interest     numeric,
-    liquidity_dollars numeric,
-    last_price_dollars numeric,
-    raw               jsonb NOT NULL,
-    fetched_at        timestamptz NOT NULL DEFAULT now()
+    ticker             TEXT PRIMARY KEY,
+    event_ticker       TEXT,
+    market_type        TEXT,
+    title              TEXT,
+    status             TEXT,
+    result             TEXT,
+    open_time          TEXT,
+    close_time         TEXT,
+    expiration_time    TEXT,
+    volume             REAL,
+    open_interest      REAL,
+    liquidity_dollars  REAL,
+    last_price_dollars REAL,
+    raw                TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS markets_event_idx ON markets (event_ticker);
 CREATE INDEX IF NOT EXISTS markets_status_idx ON markets (status);
 CREATE INDEX IF NOT EXISTS markets_close_idx ON markets (close_time);
 
 CREATE TABLE IF NOT EXISTS trades (
-    trade_id          uuid PRIMARY KEY,
-    ticker            text NOT NULL,
-    created_time      timestamptz NOT NULL,
-    yes_price_dollars numeric,
-    no_price_dollars  numeric,
-    count             numeric,
-    taker_side        text,
-    taker_outcome_side text,
-    taker_book_side   text,
-    is_block_trade    boolean
+    trade_id           TEXT PRIMARY KEY,
+    ticker             TEXT NOT NULL,
+    created_time       TEXT NOT NULL,
+    yes_price_dollars  REAL,
+    no_price_dollars   REAL,
+    count              REAL,
+    taker_side         TEXT,
+    taker_outcome_side TEXT,
+    taker_book_side    TEXT,
+    is_block_trade     INTEGER
 );
 CREATE INDEX IF NOT EXISTS trades_ticker_time_idx ON trades (ticker, created_time);
 CREATE INDEX IF NOT EXISTS trades_time_idx ON trades (created_time);
 
 CREATE TABLE IF NOT EXISTS candlesticks (
-    ticker          text NOT NULL,
-    period_interval int NOT NULL,          -- minutes: 1, 60, or 1440
-    end_period_ts   bigint NOT NULL,       -- unix seconds, end of the period
-    price_open      numeric,
-    price_high      numeric,
-    price_low       numeric,
-    price_close     numeric,
-    price_mean      numeric,
-    yes_bid_open    numeric,
-    yes_bid_high    numeric,
-    yes_bid_low     numeric,
-    yes_bid_close   numeric,
-    yes_ask_open    numeric,
-    yes_ask_high    numeric,
-    yes_ask_low     numeric,
-    yes_ask_close   numeric,
-    volume          numeric,
-    open_interest   numeric,
+    ticker          TEXT NOT NULL,
+    period_interval INTEGER NOT NULL,      -- minutes: 1 or 60
+    end_period_ts   INTEGER NOT NULL,      -- unix seconds, end of the period
+    price_open      REAL,
+    price_high      REAL,
+    price_low       REAL,
+    price_close     REAL,
+    price_mean      REAL,
+    yes_bid_open    REAL,
+    yes_bid_high    REAL,
+    yes_bid_low     REAL,
+    yes_bid_close   REAL,
+    yes_ask_open    REAL,
+    yes_ask_high    REAL,
+    yes_ask_low     REAL,
+    yes_ask_close   REAL,
+    volume          REAL,
+    open_interest   REAL,
     PRIMARY KEY (ticker, period_interval, end_period_ts)
 );
 
 -- Resumable-backfill bookkeeping.
 CREATE TABLE IF NOT EXISTS checkpoints (
-    stage      text PRIMARY KEY,
-    state      jsonb NOT NULL,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    stage      TEXT PRIMARY KEY,
+    state      TEXT NOT NULL   -- JSON
 );
 
 CREATE TABLE IF NOT EXISTS candle_progress (
-    ticker     text PRIMARY KEY,
-    done       boolean NOT NULL DEFAULT false,
-    n_candles  int,
-    error      text,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    ticker    TEXT PRIMARY KEY,
+    done      INTEGER NOT NULL DEFAULT 0,
+    n_candles INTEGER,
+    error     TEXT
 );

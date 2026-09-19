@@ -1,7 +1,8 @@
-"""One-shot resumable backfill of the entire public Kalshi archive.
+"""One-shot resumable backfill of the entire public Kalshi archive into SQLite.
 
 Stages (in order): markets -> events -> series -> trades -> candles.
-Every stage checkpoints to Postgres, so a killed run resumes where it left off.
+Every stage checkpoints into the same SQLite file, so a killed run resumes
+where it left off.
 """
 
 import json
@@ -9,10 +10,8 @@ import logging
 import os
 import threading
 import time
-
-import psycopg2.extras
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime
 
 from . import db
 from .client import KalshiClient, NotFoundError
@@ -25,7 +24,7 @@ CANDLE_MAX_PERIODS = 5000  # API cap per candlesticks request
 def _num(v):
     if v in (None, ""):
         return None
-    return v  # numeric strings go straight into Postgres numeric columns
+    return float(v)
 
 
 def _ts_to_epoch(iso: str | None) -> int | None:
@@ -57,7 +56,7 @@ def run_markets(client: KalshiClient, conn):
                   ["ticker", "event_ticker", "market_type", "title", "status", "result",
                    "open_time", "close_time", "expiration_time", "volume", "open_interest",
                    "liquidity_dollars", "last_price_dollars", "raw"],
-                  rows, "ticker", commit=False)
+                  rows, commit=False)
         count += len(rows)
         db.set_checkpoint(conn, "markets", {"cursor": cursor, "count": count})
         if count % 50_000 < 1000:
@@ -93,17 +92,16 @@ def _upsert_events(conn, items, commit=True):
     db.upsert(conn, "events",
               ["event_ticker", "series_ticker", "title", "sub_title", "category",
                "mutually_exclusive", "raw"],
-              rows, "event_ticker", commit=commit)
+              rows, commit=commit)
 
 
 # ---------------------------------------------------------------- series
 
 def run_series(client: KalshiClient, conn):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT DISTINCT e.series_ticker FROM events e
-                       LEFT JOIN series s ON s.ticker = e.series_ticker
-                       WHERE e.series_ticker IS NOT NULL AND s.ticker IS NULL""")
-        missing = [r[0] for r in cur.fetchall()]
+    missing = [r[0] for r in conn.execute(
+        """SELECT DISTINCT e.series_ticker FROM events e
+           LEFT JOIN series s ON s.ticker = e.series_ticker
+           WHERE e.series_ticker IS NOT NULL AND s.ticker IS NULL""")]
     log.info("series: %s to fetch", len(missing))
     for i, ticker in enumerate(missing, 1):
         try:
@@ -114,8 +112,7 @@ def run_series(client: KalshiClient, conn):
         db.upsert(conn, "series",
                   ["ticker", "title", "category", "frequency", "raw"],
                   [(s["ticker"], s.get("title"), s.get("category"), s.get("frequency"),
-                    json.dumps(s))],
-                  "ticker")
+                    json.dumps(s))])
         if i % 500 == 0:
             log.info("series: %s/%s", i, len(missing))
     log.info("series: complete")
@@ -144,7 +141,7 @@ def run_trades(client: KalshiClient, conn):
                   ["trade_id", "ticker", "created_time", "yes_price_dollars",
                    "no_price_dollars", "count", "taker_side", "taker_outcome_side",
                    "taker_book_side", "is_block_trade"],
-                  rows, "trade_id", do_update=False, commit=False)
+                  rows, do_update=False, commit=False)
         count += len(rows)
         db.set_checkpoint(conn, "trades", {"cursor": cursor, "count": count})
         pages_since_log += 1
@@ -163,12 +160,11 @@ def run_candles(client: KalshiClient, conn, workers: int = 6):
     min_volume = float(os.environ.get("CANDLES_MIN_VOLUME", "0.000001"))
     # Fetch events for any markets whose event the events sweep didn't cover,
     # so the seed join below is complete.
-    with conn.cursor() as cur:
-        cur.execute("""SELECT DISTINCT m.event_ticker FROM markets m
-                       LEFT JOIN events e ON e.event_ticker = m.event_ticker
-                       WHERE e.event_ticker IS NULL AND m.event_ticker IS NOT NULL
-                         AND m.volume >= %s""", (min_volume,))
-        orphans = [r[0] for r in cur.fetchall()]
+    orphans = [r[0] for r in conn.execute(
+        """SELECT DISTINCT m.event_ticker FROM markets m
+           LEFT JOIN events e ON e.event_ticker = m.event_ticker
+           WHERE e.event_ticker IS NULL AND m.event_ticker IS NOT NULL
+             AND m.volume >= ?""", (min_volume,))]
     if orphans:
         log.info("candles: fetching %s missing events for series lookup", len(orphans))
         for et in orphans:
@@ -176,18 +172,17 @@ def run_candles(client: KalshiClient, conn, workers: int = 6):
                 _upsert_events(conn, [client.get(f"/events/{et}")["event"]])
             except NotFoundError:
                 log.warning("event %s: 404", et)
-    with conn.cursor() as cur:
-        cur.execute("""INSERT INTO candle_progress (ticker)
-                       SELECT ticker FROM markets WHERE volume >= %s
-                       ON CONFLICT (ticker) DO NOTHING""", (min_volume,))
-        conn.commit()
-        cur.execute("""SELECT m.ticker, e.series_ticker, m.raw->>'open_time',
-                              m.raw->>'created_time', m.raw->>'close_time'
-                       FROM candle_progress p
-                       JOIN markets m ON m.ticker = p.ticker
-                       JOIN events e ON e.event_ticker = m.event_ticker
-                       WHERE NOT p.done ORDER BY m.volume DESC NULLS LAST""")
-        pending = cur.fetchall()
+    conn.execute("""INSERT INTO candle_progress (ticker)
+                    SELECT ticker FROM markets WHERE volume >= ?
+                    ON CONFLICT (ticker) DO NOTHING""", (min_volume,))
+    conn.commit()
+    pending = conn.execute(
+        """SELECT m.ticker, e.series_ticker, m.open_time,
+                  m.raw ->> 'created_time', m.close_time
+           FROM candle_progress p
+           JOIN markets m ON m.ticker = p.ticker
+           JOIN events e ON e.event_ticker = m.event_ticker
+           WHERE NOT p.done ORDER BY m.volume DESC""").fetchall()
     log.info("candles: %s markets pending (min_volume=%s)", len(pending), min_volume)
 
     done_count = 0
@@ -207,11 +202,9 @@ def run_candles(client: KalshiClient, conn, workers: int = 6):
                 except Exception as e:  # keep the sweep going; error is recorded
                     n, err = 0, repr(e)[:500]
                     log.warning("candles %s: %s", ticker, err)
-                with wconn.cursor() as cur:
-                    cur.execute("""UPDATE candle_progress
-                                   SET done = %s, n_candles = %s, error = %s, updated_at = now()
-                                   WHERE ticker = %s""",
-                                (err is None or err == "not_found", n, err, ticker))
+                wconn.execute("""UPDATE candle_progress
+                                 SET done = ?, n_candles = ?, error = ? WHERE ticker = ?""",
+                              (int(err is None or err == "not_found"), n, err, ticker))
                 wconn.commit()
                 with count_lock:
                     done_count += 1
@@ -260,17 +253,13 @@ def _fetch_market_candles(client, conn, ticker, series_ticker, open_iso, close_i
                 _num(c.get("volume_fp") or c.get("volume")),
                 _num(c.get("open_interest_fp") or c.get("open_interest")),
             ))
-        if rows:
-            with conn.cursor() as cur:
-                psycopg2.extras.execute_values(cur, """
-                    INSERT INTO candlesticks (ticker, period_interval, end_period_ts,
-                        price_open, price_high, price_low, price_close, price_mean,
-                        yes_bid_open, yes_bid_high, yes_bid_low, yes_bid_close,
-                        yes_ask_open, yes_ask_high, yes_ask_low, yes_ask_close,
-                        volume, open_interest)
-                    VALUES %s ON CONFLICT (ticker, period_interval, end_period_ts) DO NOTHING
-                """, rows, page_size=1000)
-            conn.commit()
+        db.upsert(conn, "candlesticks",
+                  ["ticker", "period_interval", "end_period_ts",
+                   "price_open", "price_high", "price_low", "price_close", "price_mean",
+                   "yes_bid_open", "yes_bid_high", "yes_bid_low", "yes_bid_close",
+                   "yes_ask_open", "yes_ask_high", "yes_ask_low", "yes_ask_close",
+                   "volume", "open_interest"],
+                  rows, do_update=False)
         total += len(rows)
         t = chunk_end
     return total

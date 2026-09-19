@@ -1,8 +1,15 @@
 # kalshi-archive
 
 A one-shot backfill of everything Kalshi's public trade API exposes, into a
-Supabase Postgres database. No API key required — all endpoints used are
-public reads on `api.elections.kalshi.com/trade-api/v2`.
+single SQLite file, exported as gzipped SQL dumps committed to this repo
+(`dumps/`). No API key required — all endpoints used are public reads on
+`api.elections.kalshi.com/trade-api/v2`.
+
+Restore a dump:
+
+```bash
+cat dumps/kalshi-<date>.sql.gz* | gunzip | sqlite3 kalshi.db
+```
 
 ## What it captures
 
@@ -26,43 +33,40 @@ lost, and it saves days of requests. Set `CANDLES_MIN_VOLUME=0` to force all.
 
 ```bash
 pip install -r requirements.txt
-export DATABASE_URL='postgresql://postgres:...@db.<ref>.supabase.co:5432/postgres'
-python -m kalshi_archive                  # all stages, in order
+python -m kalshi_archive                  # all stages, in order -> ./kalshi.db
 python -m kalshi_archive --stages trades  # one stage
-python -m kalshi_archive --rps 5          # gentler rate limit (default 8 req/s)
+python -m kalshi_archive export           # write dumps/kalshi-<date>.sql.gz
 ```
 
-Env knobs: `KALSHI_RPS` is `--rps`; `CANDLE_WORKERS` (default 6) parallelizes
-the per-market candle fetch; `CANDLES_MIN_VOLUME` (default: volume > 0).
+Env knobs: `DB_PATH` (default `./kalshi.db`); `CANDLE_WORKERS` (default 6)
+parallelizes the per-market candle fetch; `CANDLES_MIN_VOLUME` (default:
+volume > 0).
 
 ## Run it on GCP (the intended path)
 
 ```bash
-cat > /tmp/backfill.env <<'EOF'
-DATABASE_URL=postgresql://postgres:...@db.<ref>.supabase.co:5432/postgres
-EOF
-deploy/run_backfill_vm.sh /tmp/backfill.env
+deploy/run_backfill_vm.sh
 ```
 
 That creates an `e2-standard-2` VM (`kalshi-archive-backfill`, project
-`gen-lang-client-0850145540`, zone `us-east5-a`), ships this repo, and starts
-the backfill under systemd with restart-on-failure. Follow progress:
+`gen-lang-client-0850145540`, zone `us-east5-a`), ships this repo, and runs
+backfill → export → push-dumps-to-this-repo under systemd with
+restart-on-failure (the push uses your `gh auth token`). Follow progress:
 
 ```bash
 gcloud compute ssh kalshi-archive-backfill --project=gen-lang-client-0850145540 \
   --zone=us-east5-a --command='sudo journalctl -u kalshi-backfill -f'
 ```
 
-When the log says `backfill complete`, delete the VM:
+When the log says `DUMPS PUSHED`, `git pull` here and delete the VM:
 
 ```bash
 gcloud compute instances delete kalshi-archive-backfill \
   --project=gen-lang-client-0850145540 --zone=us-east5-a
 ```
 
-Expect the full run to take on the order of days at 8 req/s — the trade tape
-and per-market candles dominate. Use the Supabase dashboard's database size
-panel to watch it grow; the trade tape is the bulk of the final size.
+Expect the full run to take hours to a day — the trade tape and per-market
+candles dominate, and the log reports running row counts throughout.
 
 ## Rate limits & auth
 
@@ -96,8 +100,8 @@ So the archive's real depth is: full detail for roughly the current year,
 a ~90-day exact trade tape, and skeletal metadata before that. This is
 everything the API exposes.
 
-- The Supabase project should be created with enough disk headroom (the
-  archive is multi-GB; Supabase Pro auto-scales disk).
+## Notes
+
 - Stage order matters: `candles` needs `markets` + `events` done first (it
   joins them to find each market's series ticker); the driver runs them in
   the right order by default.
