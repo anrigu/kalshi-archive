@@ -35,14 +35,30 @@ def _ts_to_epoch(iso: str | None) -> int | None:
 
 # ---------------------------------------------------------------- markets
 
+# The default (no-status) sweep only walks OPEN markets forward in time —
+# settled/closed/unopened are separate paginated lanes (verified 2026-09-19),
+# and settled/closed is where ALL historical markets live.
+MARKET_STATUS_LANES = [None, "unopened", "closed", "settled"]
+EVENT_STATUS_LANES = [None, "closed", "settled"]
+
+
 def run_markets(client: KalshiClient, conn):
-    state = db.get_checkpoint(conn, "markets")
+    for status in MARKET_STATUS_LANES:
+        _sweep_markets(client, conn, status)
+
+
+def _sweep_markets(client: KalshiClient, conn, status: str | None):
+    stage = "markets" if status is None else f"markets:{status}"
+    state = db.get_checkpoint(conn, stage)
     if state.get("done"):
-        log.info("markets: already complete (%s rows)", state.get("count"))
+        log.info("%s: already complete (%s rows)", stage, state.get("count"))
         return
     cursor = state.get("cursor")
     count = state.get("count", 0)
-    for items, cursor in client.paginate("/markets", {"limit": 1000}, "markets", cursor):
+    params = {"limit": 1000}
+    if status:
+        params["status"] = status
+    for items, cursor in client.paginate("/markets", params, "markets", cursor):
         rows = [(
             m["ticker"], m.get("event_ticker"), m.get("market_type"), m.get("title"),
             m.get("status"), m.get("result"),
@@ -58,30 +74,39 @@ def run_markets(client: KalshiClient, conn):
                    "liquidity_dollars", "last_price_dollars", "raw"],
                   rows, commit=False)
         count += len(rows)
-        db.set_checkpoint(conn, "markets", {"cursor": cursor, "count": count})
+        db.set_checkpoint(conn, stage, {"cursor": cursor, "count": count})
         if count % 50_000 < 1000:
-            log.info("markets: %s rows", count)
-    db.set_checkpoint(conn, "markets", {"done": True, "count": count})
-    log.info("markets: complete, %s rows", count)
+            log.info("%s: %s rows", stage, count)
+    db.set_checkpoint(conn, stage, {"done": True, "count": count})
+    log.info("%s: complete, %s rows", stage, count)
 
 
 # ---------------------------------------------------------------- events
 
 def run_events(client: KalshiClient, conn):
-    state = db.get_checkpoint(conn, "events")
+    for status in EVENT_STATUS_LANES:
+        _sweep_events(client, conn, status)
+
+
+def _sweep_events(client: KalshiClient, conn, status: str | None):
+    stage = "events" if status is None else f"events:{status}"
+    state = db.get_checkpoint(conn, stage)
     if state.get("done"):
-        log.info("events: already complete (%s rows)", state.get("count"))
+        log.info("%s: already complete (%s rows)", stage, state.get("count"))
         return
     cursor = state.get("cursor")
     count = state.get("count", 0)
-    for items, cursor in client.paginate("/events", {"limit": 200}, "events", cursor):
+    params = {"limit": 200}
+    if status:
+        params["status"] = status
+    for items, cursor in client.paginate("/events", params, "events", cursor):
         _upsert_events(conn, items, commit=False)
         count += len(items)
-        db.set_checkpoint(conn, "events", {"cursor": cursor, "count": count})
+        db.set_checkpoint(conn, stage, {"cursor": cursor, "count": count})
         if count % 10_000 < 200:
-            log.info("events: %s rows", count)
-    db.set_checkpoint(conn, "events", {"done": True, "count": count})
-    log.info("events: complete, %s rows", count)
+            log.info("%s: %s rows", stage, count)
+    db.set_checkpoint(conn, stage, {"done": True, "count": count})
+    log.info("%s: complete, %s rows", stage, count)
 
 
 def _upsert_events(conn, items, commit=True):

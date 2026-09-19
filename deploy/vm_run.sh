@@ -13,10 +13,14 @@ fi
 rm -rf repo
 git clone --depth 1 "https://x-access-token:${GITHUB_TOKEN}@github.com/anrigu/kalshi-archive.git" repo
 mkdir -p repo/dumps
-cp dumps/kalshi-*.sql.gz* repo/dumps/
 cd repo
-git -c user.name=kalshi-archive-vm -c user.email=arenaprophet@gmail.com \
-  add dumps && git -c user.name=kalshi-archive-vm -c user.email=arenaprophet@gmail.com \
-  commit -m "Add Kalshi archive dump $(date -u +%F)"
-git push
+git config user.name kalshi-archive-vm
+git config user.email arenaprophet@gmail.com
+# One commit + push per part: GitHub rejects packs over 2GB.
+for f in ../dumps/kalshi-*.sql.gz*; do
+  cp "$f" dumps/
+  git add dumps
+  git commit -m "Kalshi archive dump $(date -u +%F): $(basename "$f")"
+  git push
+done
 echo "DUMPS PUSHED"
