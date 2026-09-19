@@ -64,13 +64,37 @@ Expect the full run to take on the order of days at 8 req/s — the trade tape
 and per-market candles dominate. Use the Supabase dashboard's database size
 panel to watch it grow; the trade tape is the bulk of the final size.
 
-## Notes
+## Rate limits & auth
 
-- **History floor:** the public API does not serve markets that closed before
-  roughly June 2023 (verified empirically 2026-09: `max_close_ts` probes for
-  2021–May 2023 return empty; the oldest reachable close is 2023-06-22), and
-  the trade tape is bounded the same way. Kalshi launched in July 2021, but
-  "as far back as the API exposes" starts at that floor.
+Default is 20 req/s anonymous. All endpoints used are public reads; measured
+2026-09-19, anonymous traffic sustained 35 req/s with zero 429s, and the
+serial pagination stages are latency-bound (~4-8 pages/s) rather than
+limiter-bound anyway. Kalshi's documented token budget (Basic tier: 200
+tokens/s at 10 tokens/request = 20 req/s; self-serve Advanced tier: 30 req/s)
+applies to signed requests. To sign, set `KALSHI_ACCESS_KEY_ID` (the key ID
+UUID from the Kalshi dashboard) plus `KALSHI_PRIVATE_KEY_PEM_B64` (base64 PEM)
+or `KALSHI_PRIVATE_KEY_PATH`. Note: sending the PEM blob as the access key
+(the legacy ai-prophet-web behaviour) does NOT authenticate — verified 401 on
+an authenticated endpoint; a real key ID is required.
+
+## What the API actually retains (measured 2026-09-19)
+
+Kalshi launched July 2021, but the public v2 API serves far less than full
+history, and authentication does not change data availability:
+
+- **Trades:** ~90 days, globally and per-ticker alike. Probes: `max_ts` of
+  now-60d returns trades, now-90d is empty; per-ticker trades on traded
+  markets that closed in April/June 2026 return empty.
+- **Markets/events/series metadata:** only ~6,700 markets closing before 2026
+  are enumerable at all (remnants back to mid-2023), and every one of them
+  reports zero volume. Full metadata exists for 2026 markets.
+- **Candlesticks:** served wherever the market is still enumerable and traded
+  (verified 81 hourly candles on an April-2026 market) — deeper than trades,
+  bounded by the metadata retention above.
+
+So the archive's real depth is: full detail for roughly the current year,
+a ~90-day exact trade tape, and skeletal metadata before that. This is
+everything the API exposes.
 
 - The Supabase project should be created with enough disk headroom (the
   archive is multi-GB; Supabase Pro auto-scales disk).
