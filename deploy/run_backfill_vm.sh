@@ -4,11 +4,11 @@
 #
 # Usage: deploy/run_backfill_vm.sh
 #   Optional env: KALSHI_RPS, CANDLE_WORKERS, CANDLES_MIN_VOLUME (forwarded),
-#   GITHUB_TOKEN (defaults to `gh auth token`) for the final push.
+#   DUMP_BUCKET (default gs://prophet-kalshi-archive) for the final upload.
 #
 # The backfill runs as a systemd unit (kalshi-backfill) with Restart=on-failure;
 # checkpoints live in the SQLite file, so restarts resume cleanly. The unit
-# logs "DUMPS PUSHED" when everything is in the repo — then delete the VM:
+# logs "DUMPS UPLOADED" when everything is in the bucket — then delete the VM:
 #   gcloud compute instances delete kalshi-archive-backfill --project=$PROJECT --zone=$ZONE
 
 set -euo pipefail
@@ -16,14 +16,13 @@ set -euo pipefail
 PROJECT="${PROJECT:-gen-lang-client-0850145540}"
 ZONE="${ZONE:-us-east5-a}"
 NAME="${NAME:-kalshi-archive-backfill}"
-GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token)}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 ENV_FILE="$(mktemp -t kalshi-env)"
 chmod 600 "$ENV_FILE"
 {
-  echo "GITHUB_TOKEN=$GITHUB_TOKEN"
+  echo "DUMP_BUCKET=${DUMP_BUCKET:-gs://prophet-kalshi-archive}"
   for v in KALSHI_RPS CANDLE_WORKERS CANDLES_MIN_VOLUME; do
     [ -n "${!v:-}" ] && echo "$v=${!v}"
   done
@@ -33,8 +32,9 @@ echo "==> creating VM $NAME in $PROJECT/$ZONE"
 gcloud compute instances create "$NAME" \
   --project="$PROJECT" --zone="$ZONE" \
   --machine-type=e2-standard-2 \
+  --scopes=default,storage-rw \
   --image-family=debian-12 --image-project=debian-cloud \
-  --boot-disk-size=60GB --boot-disk-type=pd-balanced
+  --boot-disk-size=500GB --boot-disk-type=pd-balanced
 
 echo "==> waiting for SSH"
 for i in $(seq 1 30); do

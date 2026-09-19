@@ -1,14 +1,16 @@
 # kalshi-archive
 
 A one-shot backfill of everything Kalshi's public trade API exposes, into a
-single SQLite file, exported as gzipped SQL dumps committed to this repo
-(`dumps/`). No API key required — all endpoints used are public reads on
-`api.elections.kalshi.com/trade-api/v2`.
+single SQLite file, exported as gzipped SQL dumps stored in
+**`gs://prophet-kalshi-archive`** (GCP project `gen-lang-client-0850145540`).
+This repo holds only the code. No API key required — all endpoints used are
+public reads on `api.elections.kalshi.com/trade-api/v2`.
 
-Restore a dump:
+Fetch and restore a dump:
 
 ```bash
-cat dumps/kalshi-<date>.sql.gz* | gunzip | sqlite3 kalshi.db
+gcloud storage cp 'gs://prophet-kalshi-archive/kalshi-<date>.sql.gz*' .
+cat kalshi-<date>.sql.gz* | gunzip | sqlite3 kalshi.db
 ```
 
 ## What it captures
@@ -51,14 +53,14 @@ deploy/run_backfill_vm.sh
 That creates an `e2-standard-2` VM (`kalshi-archive-backfill`, project
 `gen-lang-client-0850145540`, zone `us-east5-a`), ships this repo, and runs
 backfill → export → push-dumps-to-this-repo under systemd with
-restart-on-failure (the push uses your `gh auth token`). Follow progress:
+restart-on-failure. Follow progress:
 
 ```bash
 gcloud compute ssh kalshi-archive-backfill --project=gen-lang-client-0850145540 \
   --zone=us-east5-a --command='sudo journalctl -u kalshi-backfill -f'
 ```
 
-When the log says `DUMPS PUSHED`, `git pull` here and delete the VM:
+When the log says `DUMPS UPLOADED`, delete the VM:
 
 ```bash
 gcloud compute instances delete kalshi-archive-backfill \
